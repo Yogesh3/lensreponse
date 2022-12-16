@@ -1,5 +1,4 @@
 import myfuncs as mf
-mf.import_plt('niagara')
 import numpy as np
 import healpy as hp
 from pixell import enmap, curvedsky
@@ -69,7 +68,7 @@ def vecNanStat(x, statistic="mean", **npkwargs):
 
 #Parser
 parser = argparse.ArgumentParser(description='Calculates kappa response function in harmonic and fourier space.')
-parser.add_argument('--sim_version', type=str, default='v3', choices=['v3', 'v2', 'gerrit'])
+parser.add_argument('--sim_version', type=str, default='v3', choices=['v3', 'v2', 'gerrit', 'release'])
 parser.add_argument('--space', type=str, default='both', choices=['harmonic', 'fourier', 'both'])
 parser.add_argument('--fft_normalize', type=str, default='no', choices=['yes', 'no'], help='normalize kappa sims by the fft normalization curve from symlens before calculating the harmonic response function?')
 parser.add_argument('--nsims', type=int, default=0, help='number of simulations (leave blank for max sims in this set)')
@@ -86,7 +85,6 @@ PROJECT = '/project/r/rbond/ymehta3/'
 INPUT_PATH = PROJECT + 'input_data/kappa_sims/'
 inkappa_path = '/scratch/r/rbond/msyriac/data/sims/alex/v0.4/'
 # inkappa_path = '/project/r/rbond/ymehta3/output/COSMO2017_10K_acc3_lenspotentialCls.dat'
-mask_path = '/home/r/rbond/jiaqu/scratch/DR6/maps/sims/map_masks/BN_bottomcutsmooth1.fits'
 Al_path = SCRATCH + 'twodratio_TT.fits'
 
 #Get Kapps Sims Names
@@ -94,12 +92,23 @@ if args.sim_version == 'v2':
     outkappa_path = '/home/r/rbond/jiaqu/scratch/DR6/coaddMV4phoct9/stage_scatter/'
     kappasims_names = INPUT_PATH + 'iokappas_v2.txt'
     OUTPUT_PATH = '/project/r/rbond/ymehta3/output/lensresponse/v2/'
+
 elif args.sim_version == 'v3':
     outkappa_path = '/project/r/rbond/jiaqu/kappa_maps/sims/'
     kappasims_names = INPUT_PATH + 'iokappas_v3.txt'
     ikappa_names = INPUT_PATH + 'ikappas_v3.txt'
     okappa_names = INPUT_PATH + 'kappasims_v3.txt'
     OUTPUT_PATH = '/project/r/rbond/ymehta3/output/lensresponse/v3/'
+    mask_path = '/home/r/rbond/jiaqu/scratch/DR6/maps/sims/map_masks/BN_bottomcutsmooth1.fits'
+
+elif args.sim_version == 'release':
+    outkappa_path = '/home/r/rbond/jiaqu/DR6lensing_backup/DR6lensing/full_mask/output/release_sims/'
+    kappasims_names = INPUT_PATH + 'iokappas_release.txt'
+    ikappa_names = INPUT_PATH + 'ikappas_release.txt'
+    okappa_names = INPUT_PATH + 'kappasims_release.txt'
+    OUTPUT_PATH = '/project/r/rbond/ymehta3/output/lensresponse/release/'
+    mask_path = PROJECT + 'kmask_release.fits'
+
 elif args.sim_version == 'gerrit':
     outkappa_path = '/scratch/r/rbond/gfarren/unWISExACT_outputs/sims/kappa/'
     kappasims_names = INPUT_PATH + 'iokappas_gerrit.txt'
@@ -109,6 +118,7 @@ elif args.sim_version == 'gerrit':
         OUTPUT_PATH = SCRATCH + 'output/lensresponse/gerrit/'
     else:
         OUTPUT_PATH = args.outdir
+    mask_path = '/home/r/rbond/jiaqu/scratch/DR6/downgrade/downgrade/act_mask_20220316_GAL060_rms_70.00_d2sk.fits'
     mc_corr_path = outkappa_path + 'all_MV_mc_bias_MV_sims1-400'
 
 #Output Stats Files Info
@@ -146,15 +156,21 @@ if rank == 0:
     startime = time.time() 
 
     #Get All of the Sims Names
-    with open(kappasims_names) as iok_files, open(mc_corr_path) as bias_obj:
-        reader = csv.reader(iok_files, delimiter=' ')
-        for line in reader:
-            fnames_all.append(line)
+    if args.sim_version == 'gerrit':
+        with open(kappasims_names) as iok_files, open(mc_corr_path) as bias_obj:
+            reader = csv.reader(iok_files, delimiter=' ')
+            for line in reader:
+                fnames_all.append(line)
 
-        if args.sim_version == 'gerrit':
-            for line in bias_obj:
-                mc_bias.append(float(line.rstrip('\n')))
-            mc_bias = np.array(mc_bias)
+                for line in bias_obj:
+                    mc_bias.append(float(line.rstrip('\n')))
+                # mc_bias = np.array(mc_bias)
+
+    else:
+        with open(kappasims_names) as iok_files:
+            reader = csv.reader(iok_files, delimiter=' ')
+            for line in reader:
+                fnames_all.append(line)
 
     if args.nsims != 0:
         fnames_all = fnames_all[:args.nsims]
@@ -178,7 +194,7 @@ if rank == 0:
 comm.Bcast(rows_per_rank, root=0)
 comm.Bcast(displacement, root=0)
 mc_bias = comm.bcast(mc_bias, root=0)
-mc_bias = np.array(mc_bias)
+mc_bias = np.array(mc_bias, dtype=np.double)
 fnames_all = comm.bcast(fnames_all, root=0)
 fnames_subset = fnames_all[displacement[rank] : displacement[rank+1]]
 
@@ -202,10 +218,11 @@ for simfiles in fnames_subset:
         okappaarray = np.load(okappa_filename)
         okappaarray = (okappaarray[1]+okappaarray[2]+okappaarray[3]+okappaarray[4]+okappaarray[5]+okappaarray[6])/6
         okappa = np.cdouble(okappaarray)
-    elif args.sim_version == 'v3' or args.sim_version == 'gerrit':
+    else: 
         okappa = hp.read_alm(okappa_filename)
         okappa = np.cdouble(okappa)
-        okappa = hp.sphtfunc.almxfl(okappa, 1/mc_bias)     # undo isotropic response function from Gerrit
+        if args.sim_version == 'gerrit':
+            okappa = hp.sphtfunc.almxfl(okappa, mc_bias)     # undo isotropic response function from Gerrit
     
     #Preliminary Info from Output Alms
     olmax = hp.Alm.getlmax(len(okappa))
@@ -270,13 +287,13 @@ for simfiles in fnames_subset:
     
         #R1: avg of ratios
         harm_sim_R1 = harm_sim_num / harm_sim_denom
-        harm_R1 += harm_sim_R1#Current Sim Cross/Auto Spectra in Fourier Space 
+        harm_R1 += harm_sim_R1
     
         #R2: ratio of avgs
         harm_avgnum += harm_sim_num
         harm_avgdenom += harm_sim_denom
     
-        #Statistics of R1: Harmonic       
+        #Harmonic Statistics
         harm_sim_R1_Ls = [harm_sim_R1[2:, :], harm_sim_R1[2:1000, :1000], harm_sim_R1[2:2000, :2000]]
         harm_sim_R1_means = vecNanStat(harm_sim_R1_Ls, 'mean')
         harm_sim_R1_meds = vecNanStat(harm_sim_R1_Ls, 'median')
@@ -285,6 +302,7 @@ for simfiles in fnames_subset:
     
     #Fourier Calculations
     if args.space == 'fourier' or args.space == 'both':
+        #Current Sim Cross/Auto Spectra in Fourier Space 
         fft_sim_num = np.real(fft_imap * np.conjugate(fft_omap))
         fft_sim_denom = np.real(fft_imap * np.conjugate(fft_imap))
         if simnum == 1:
@@ -347,7 +365,7 @@ if args.space == 'harmonic' or args.space == 'both':
             for i, name in enumerate(savenames):
                 savenames[i] = name + '_Al'
         for i, name in enumerate(savenames):
-            savenames[i] = name + '_' + str(args.nsims)
+            savenames[i] = name + '_' + str(Nsims)
         
         #Save Outputs
         saveobjs = [harm_R1avg, harm_R2avg, harm_avgnum, harm_avgdenom]
