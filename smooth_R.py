@@ -10,13 +10,14 @@ Smooths given response function.
 
 #Parser
 parser = argparse.ArgumentParser(description= "Smooths given response functions")
-parser.add_argument('--sim_version', type=str, default='gerrit', choices=['v3', 'v2', 'gerrit'])
+parser.add_argument('--sim_version', type=str, default='gerrit', choices=['v3', 'v2', 'gerrit', 'release'])
+parser.add_argument('--factors', type=int, action='append', help='Smoothing factor(s)')
+parser.add_argument('--only_max_sims', type=mf.str2bool, help='Only smooth response function corresponding to the maximum number of sims?')
 parser.add_argument('--outdir', type=str, default='project', choices=['project', 'scratch'])
 args = parser.parse_args()
 
 #Paths 
-if args.sim_version == 'gerrit':
-    R_names_file = '/project/r/rbond/ymehta3/input_data/kappa_sims/R_gerr_coarse_names.txt'
+R_names_file = '/project/r/rbond/ymehta3/input_data/kappa_sims/R_' + args.sim_version + '_coarse_names.txt'
 if (args.outdir).lower() == 'project':
     OUTDIR = '/project/r/rbond/ymehta3/output/lensresponse/'
 elif (args.outdir).lower() == 'scratch':
@@ -29,8 +30,11 @@ OUTPATH = OUTDIR + args.sim_version + "/"
 
 #Read Response Functions Names
 N_Rs, R_names = mf.readTxt(R_names_file)
+if args.only_max_sims:
+    R_names = R_names[-1]
 
-factor_list = [32, 64, 128]
+#Smoothing Factors
+factor_list = args.factors
 # factor_list = [32]
 
 for iR, R_name in enumerate(R_names):
