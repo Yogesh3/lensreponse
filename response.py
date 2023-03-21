@@ -68,11 +68,17 @@ def vecNanStat(x, statistic="mean", **npkwargs):
 
 #Parser
 parser = argparse.ArgumentParser(description='Calculates kappa response function in harmonic and fourier space.')
-parser.add_argument('--sim_version', type=str, default='v3', choices=['v3', 'v2', 'gerrit', 'release'])
-parser.add_argument('--space', type=str, default='both', choices=['harmonic', 'fourier', 'both'])
+parser.add_argument('--sim_version', type=str, default='release', choices=['v3', 'v2', 'gerrit', 'release', 'nonoise'])
+parser.add_argument('--R_def', type=str, default='R2', choices=['R2', 'R1', 'both'])
+parser.add_argument('--channel', type=str, choices=['MV', 'POL', 'both'])
+parser.add_argument('--space', type=str, default='harmonic', choices=['harmonic', 'fourier', 'both'])
+parser.add_argument('--iso', action='store_true')
+parser.add_argument('--aniso', dest='iso', action='store_false')
+parser.add_argument('--convergence', type = mf.str2bool, default='false', help='calculate std of every ~100 sims for convergence test')
 parser.add_argument('--fft_normalize', type=str, default='no', choices=['yes', 'no'], help='normalize kappa sims by the fft normalization curve from symlens before calculating the harmonic response function?')
 parser.add_argument('--nsims', type=int, default=0, help='number of simulations (leave blank for max sims in this set)')
 parser.add_argument('--outdir', type=str, default='project', choices=['project', 'scratch'])
+parser.set_defaults(iso = False)
 args = parser.parse_args()
 
 comm = MPI.COMM_WORLD
@@ -96,6 +102,7 @@ if args.sim_version == 'v2':
 elif args.sim_version == 'v3':
     outkappa_path = '/project/r/rbond/jiaqu/kappa_maps/sims/'
     kappasims_names = INPUT_PATH + 'iokappas_v3.txt'
+    kappasims_names = INPUT_PATH + 'iokappas_v3.txt'
     ikappa_names = INPUT_PATH + 'ikappas_v3.txt'
     okappa_names = INPUT_PATH + 'kappasims_v3.txt'
     OUTPUT_PATH = '/project/r/rbond/ymehta3/output/lensresponse/v3/'
@@ -103,11 +110,15 @@ elif args.sim_version == 'v3':
 
 elif args.sim_version == 'release':
     outkappa_path = '/home/r/rbond/jiaqu/DR6lensing_backup/DR6lensing/full_mask/output/release_sims/'
-    kappasims_names = INPUT_PATH + 'iokappas_release.txt'
-    ikappa_names = INPUT_PATH + 'ikappas_release.txt'
-    okappa_names = INPUT_PATH + 'kappasims_release.txt'
+    if args.channel == 'MV':
+        kappasims_names = INPUT_PATH + 'iokappas_release_MV.txt'
+    elif args.channel == 'POL':
+        kappasims_names = INPUT_PATH + 'iokappas_release_POL.txt'
+    else:
+        raise ValueError('"channel" argument must be set appropriately (it\'s case sensitive)')
     OUTPUT_PATH = '/project/r/rbond/ymehta3/output/lensresponse/release/'
-    mask_path = PROJECT + 'kmask_release.fits'
+#    mask_path = '/home/r/rbond/jiaqu/scratch/DR6/downgrade/downgrade/act_mask_20220316_GAL060_rms_70.00_d2.fits'
+    mask_path = '/home/r/rbond/jiaqu/scratch/DR6/downgrade/downgrade/act_mask_20220316_GAL060_rms_70.00_d2sk.fits'
 
 elif args.sim_version == 'gerrit':
     outkappa_path = '/scratch/r/rbond/gfarren/unWISExACT_outputs/sims/kappa/'
@@ -121,8 +132,9 @@ elif args.sim_version == 'gerrit':
     mask_path = '/home/r/rbond/jiaqu/scratch/DR6/downgrade/downgrade/act_mask_20220316_GAL060_rms_70.00_d2sk.fits'
     mc_corr_path = outkappa_path + 'all_MV_mc_bias_MV_sims1-400'
 
+
 #Output Stats Files Info
-if rank == 0:
+if rank == 0 and (args.R_def == 'R1' or args.R_def == 'both'):
     header_harm = ["avg R for all ells", "avg R up to ell=1000", "avg R up to ell=2000",
                     "median R for all ells", "median R up to ell=1000", "median R up to ell=2000"]
     header_harm = ', '.join(header_harm)
@@ -172,23 +184,18 @@ if rank == 0:
             for line in reader:
                 fnames_all.append(line)
 
+    #Limit Scope to Max Sims
     if args.nsims != 0:
         fnames_all = fnames_all[:args.nsims]
 
+    #Number of Sims Per Rank
     base_work, remainder = divmod(len(fnames_all), Nprocs)    
-    
-    for p in range(Nprocs):
-        #Number of Sims Per Rank
-        if p < remainder:
-            rows_per_rank[p] = base_work + 1
-        else:
-            rows_per_rank[p] = base_work
+    rows_per_rank[:] = base_work
+    if remainder > 0: rows_per_rank[-remainder:] += 1         # rank 0 never gets extra work
 
-        #Starting Index For Each Rank
-        displacement[p] = sum(rows_per_rank[:p])
-
-    #Add Ending Index
-    displacement[-1] = sum(rows_per_rank) + 1
+    #Add ending Indices For Each Rank
+    displacement[1:] = np.cumsum(rows_per_rank)
+    displacement[-1] += 1      # so that the final sim is included
     
 #Farm Out Inputs
 comm.Bcast(rows_per_rank, root=0)
@@ -198,6 +205,17 @@ mc_bias = np.array(mc_bias, dtype=np.double)
 fnames_all = comm.bcast(fnames_all, root=0)
 fnames_subset = fnames_all[displacement[rank] : displacement[rank+1]]
 
+#Convergence
+if args.convergence:
+    if rank == 0:
+        mu_tot = np.zeros(Nprocs)
+        var_tot = np.zeros(Nprocs)
+        n_tot = np.zeros(Nprocs)
+    else:
+        mu_tot = None
+        var_tot = None
+        n_tot = None
+
 #Initializations
 simnum = 1
 tot_time = 0
@@ -205,6 +223,8 @@ harm_stats_tot = []
 fft_stats_tot = []
 rank_Nsims = rows_per_rank[rank]
 Nsims = sum(rows_per_rank)
+delta = 100
+rank_delta = delta % Nprocs
 
 for simfiles in fnames_subset:
     sim_startime = time.time()
@@ -217,19 +237,19 @@ for simfiles in fnames_subset:
     if args.sim_version == 'v2':
         okappaarray = np.load(okappa_filename)
         okappaarray = (okappaarray[1]+okappaarray[2]+okappaarray[3]+okappaarray[4]+okappaarray[5]+okappaarray[6])/6
-        okappa = np.cdouble(okappaarray)
+        okappa_idx = np.cdouble(okappaarray)
     else: 
-        okappa = hp.read_alm(okappa_filename)
-        okappa = np.cdouble(okappa)
+        okappa_idx = hp.read_alm(okappa_filename)
+        okappa_idx = np.cdouble(okappa_idx)
         if args.sim_version == 'gerrit':
-            okappa = hp.sphtfunc.almxfl(okappa, mc_bias)     # undo isotropic response function from Gerrit
+            okappa_idx = hp.sphtfunc.almxfl(okappa_idx, mc_bias)     # undo isotropic response function from Gerrit
     
     #Preliminary Info from Output Alms
-    olmax = hp.Alm.getlmax(len(okappa))
+    olmax = hp.Alm.getlmax(len(okappa_idx))
 
     #Make Output Map
     footprint = enmap.zeros(mask_map.shape, wcs=mask_map.wcs)
-    omap = curvedsky.alm2map(okappa, footprint, tweak=True)
+    omap = curvedsky.alm2map(okappa_idx, footprint, tweak=True)
 
     #Read Input Alms
     ikappa_filename = inkappa_path + simfiles[0]
@@ -246,13 +266,13 @@ for simfiles in fnames_subset:
 
     #Make Masked Input Map
     imap = curvedsky.alm2map(ikappa_alms, footprint, tweak=True)
-    imap_masked = imap * mask_map**2         # why am I squaring the mask?
-    ikappa_alms = curvedsky.map2alm(imap_masked, lmax= ilmax, tweak=True)
+    imap_masked = imap * mask_map**2         # reconstruction multiplies two copies of the masked maps
+    ikappa_idx = curvedsky.map2alm(imap_masked, lmax= olmax, tweak=True)
 
     #Convert kappas To l,m Grid
-    ikappalm = idx2lm(ikappa_alms)
-    ikappalm = ikappalm[:olmax+1, :olmax+1]
-    okappalm = idx2lm(okappa)
+    ikappalm = idx2lm(ikappa_idx)
+    # ikappalm = ikappalm[:olmax+1, :olmax+1]
+    okappalm = idx2lm(okappa_idx)
 
     if args.space == 'fourier' or args.space == 'both' or args.fft_normalize == 'yes':
         #Fourier Transforms
@@ -262,9 +282,13 @@ for simfiles in fnames_subset:
     #Initialize
     if simnum == 1:
         if args.space == 'harmonic' or args.space == 'both':
-            harm_R1       = np.zeros((olmax+1, olmax+1))
-            harm_avgnum   = np.zeros((olmax+1, olmax+1))
-            harm_avgdenom = np.zeros((olmax+1, olmax+1))
+            if args.iso:
+                harm_avgnum   = np.zeros(olmax+1)
+                harm_avgdenom = np.zeros(olmax+1)
+            else:
+                harm_R1       = np.zeros((olmax+1, olmax+1))
+                harm_avgnum   = np.zeros((olmax+1, olmax+1))
+                harm_avgdenom = np.zeros((olmax+1, olmax+1))
         if args.space == 'fourier' or args.space == 'both':
             fft_R1       = np.zeros(omap.shape)
             fft_sumnum   = np.zeros(omap.shape)
@@ -280,26 +304,42 @@ for simfiles in fnames_subset:
             okappalm = idx2lm(okappalm)
 
         #Current Sim Cross/Auto Spectra in Harmonic Space 
-        harm_sim_num = np.real(ikappalm * np.conjugate(okappalm))
-        harm_sim_denom = np.real(ikappalm * np.conjugate(ikappalm))
-        harm_sim_num = np.where(harm_sim_num==0, np.nan, harm_sim_num)
-        harm_sim_denom = np.where(harm_sim_denom==0, np.nan, harm_sim_denom)
+        if args.iso:
+            harm_sim_num = hp.alm2cl(ikappa_idx, alms2=okappa_idx, lmax=olmax)
+            harm_sim_denom = hp.alm2cl(ikappa_idx, alms2=ikappa_idx, lmax=olmax)
+        else:
+            harm_sim_num = np.real(ikappalm * np.conjugate(okappalm))
+            harm_sim_denom = np.real(ikappalm * np.conjugate(ikappalm))
+            harm_sim_num = np.where(harm_sim_num==0, np.nan, harm_sim_num)
+            harm_sim_denom = np.where(harm_sim_denom==0, np.nan, harm_sim_denom)
     
-        #R1: avg of ratios
-        harm_sim_R1 = harm_sim_num / harm_sim_denom
-        harm_R1 += harm_sim_R1
+        if args.R_def == 'R1' or args.R_def == 'both':
+            #R1: avg of ratios
+            harm_sim_R1 = harm_sim_num / harm_sim_denom
+            harm_R1 += harm_sim_R1
     
-        #R2: ratio of avgs
-        harm_avgnum += harm_sim_num
-        harm_avgdenom += harm_sim_denom
+            #Harmonic Statistics
+            harm_sim_R1_Ls = [harm_sim_R1[2:, :], harm_sim_R1[2:1000, :1000], harm_sim_R1[2:2000, :2000]]
+            harm_sim_R1_means = vecNanStat(harm_sim_R1_Ls, 'mean')
+            harm_sim_R1_meds = vecNanStat(harm_sim_R1_Ls, 'median')
+            harm_stats_sim = harm_sim_R1_means + harm_sim_R1_meds
+            harm_stats_tot.append(harm_stats_sim)
     
-        #Harmonic Statistics
-        harm_sim_R1_Ls = [harm_sim_R1[2:, :], harm_sim_R1[2:1000, :1000], harm_sim_R1[2:2000, :2000]]
-        harm_sim_R1_means = vecNanStat(harm_sim_R1_Ls, 'mean')
-        harm_sim_R1_meds = vecNanStat(harm_sim_R1_Ls, 'median')
-        harm_stats_sim = harm_sim_R1_means + harm_sim_R1_meds
-        harm_stats_tot.append(harm_stats_sim)
+        elif args.R_def == 'R2' or args.R_def == 'both':
+            #R2: ratio of avgs
+            harm_avgnum += harm_sim_num
+            harm_avgdenom += harm_sim_denom
     
+            #Calculate Convergence Test Info
+            if simnum == rank_delta and args.convergence:
+                mu = np.mu(harm_avgnum/harm_avgdenom)
+                var = np.var(harm_avgnum/harm_avgdenom)
+                n_sims = simnum
+                mu_tot = comm.Gather(mu, root=0)
+                var_tot = comm.Gather(var, root=0)
+                n_tot = comm.Gather(n_sims, root=0)
+
+
     #Fourier Calculations
     if args.space == 'fourier' or args.space == 'both':
         #Current Sim Cross/Auto Spectra in Fourier Space 
@@ -309,66 +349,81 @@ for simfiles in fnames_subset:
             np.save(f'/scratch/r/rbond/ymehta3/fft_num_{rank}.npy', fft_sim_num)
             np.save(f'/scratch/r/rbond/ymehta3/fft_denom_{rank}.npy', fft_sim_denom)
     
-        #R1: avg of ratios
-        fft_sim_R1 = fft_sim_num / fft_sim_denom
-        fft_R1 += fft_sim_R1
+        if args.R_def == 'R1' or args.R_def == 'both':
+            #R1: avg of ratios
+            fft_sim_R1 = fft_sim_num / fft_sim_denom
+            fft_R1 += fft_sim_R1
     
-        #R2: ratio of avgs
-        fft_sumnum += fft_sim_num
-        fft_sumdenom += fft_sim_denom
+            #Statistics of R1: Fouriers
+            fft_sim_R1_means = vecNanStat(fft_sim_R1, 'mean')
+            fft_sim_R1_meds = vecNanStat(fft_sim_R1, 'median')
+            fft_stats_sim = fft_sim_R1_means + fft_sim_R1_meds
+            fft_stats_tot.append(fft_stats_sim)
+    
+        elif args.R_def == 'R2' or args.R_def == 'both':
+            #R2: ratio of avgs
+            fft_sumnum += fft_sim_num
+            fft_sumdenom += fft_sim_denom
         
-        #Statistics of R1: Fouriers
-        fft_sim_R1_means = vecNanStat(fft_sim_R1, 'mean')
-        fft_sim_R1_meds = vecNanStat(fft_sim_R1, 'median')
-        fft_stats_sim = fft_sim_R1_means + fft_sim_R1_meds
-        fft_stats_tot.append(fft_stats_sim)
-    
     #Time Diagnostics
     sim_endtime = time.time()
     tot_time = mf.printSimTime(sim_startime, sim_endtime, rank, simnum, rank_Nsims, tot_time)
 
     simnum += 1
 
+
 #Harmonic Collection and Saving
 if args.space == 'harmonic' or args.space == 'both':
     harm_stats = np.array(harm_stats_tot)
 
     #Gather Harmonic Quantities
-    Nls, Nms = harm_R1.shape
-    harm_R1_tot = np.zeros((Nprocs, Nls, Nms))
-    harm_avgnum_tot = np.zeros((Nprocs, Nls, Nms))
-    harm_avgdenom_tot = np.zeros((Nprocs, Nls, Nms))
-    comm.Gather(harm_R1, harm_R1_tot, root=0)
-    comm.Gather(harm_avgnum, harm_avgnum_tot, root=0)
-    comm.Gather(harm_avgdenom, harm_avgdenom_tot, root=0)
-
-    #Gather Harm Stats Info
-    hstats_Ncol = harm_stats.shape[1]
-    hstats_count = rows_per_rank * hstats_Ncol
-    hstats_disp = np.array([sum(hstats_count[:r]) for r in range(Nprocs)])
-    harm_stats_tot = np.zeros((Nsims, hstats_Ncol))
-    comm.Gatherv(harm_stats, [harm_stats_tot, hstats_count, hstats_disp, MPI.DOUBLE], root=0)
-
+    tot_shape = [Nprocs] + list(harm_avgnum.shape)
+    if args.R_def == 'R1' or args.R_def == 'both':
+        harm_R1_tot = np.zeros(tot_shape)
+        comm.Gather(harm_R1, harm_R1_tot, root=0)
+    if args.R_def == 'R2' or args.R_def == 'both':
+        harm_avgnum_tot = np.zeros(tot_shape)
+        harm_avgdenom_tot = np.zeros(tot_shape)
+        comm.Gather(harm_avgnum, harm_avgnum_tot, root=0)
+        comm.Gather(harm_avgdenom, harm_avgdenom_tot, root=0)
+                        
+    if args.R_def == 'R1' or args.R_def == 'both':
+        #Gather Harm Stats Info
+        hstats_Ncol = harm_stats.shape[1]
+        hstats_count = rows_per_rank * hstats_Ncol
+        hstats_disp = np.array([sum(hstats_count[:r]) for r in range(Nprocs)])
+        harm_stats_tot = np.zeros((Nsims, hstats_Ncol))
+        comm.Gatherv(harm_stats, [harm_stats_tot, hstats_count, hstats_disp, MPI.DOUBLE], root=0)
+                                        
     if rank == 0:
-        harm_R1avg = np.sum(harm_R1_tot, axis=0) / Nsims
-
-        harm_avgnum = np.sum(harm_avgnum_tot, axis=0)  / Nsims
-        harm_avgdenom = np.sum(harm_avgdenom_tot, axis=0) / Nsims
-        harm_R2avg = harm_avgnum / harm_avgdenom
-
-        #Stats: Writting to Log
-        np.savetxt(harm_stats_outpath, harm_stats_tot, header=header_harm)
+        #Average over the Ranks
+        if args.R_def == 'R1' or args.R_def == 'both':
+            harm_R1avg = np.sum(harm_R1_tot, axis=0) / Nsims
+        if args.R_def == 'R2' or args.R_def == 'both':
+            harm_avgnum = np.sum(harm_avgnum_tot, axis=0)  / Nsims
+            harm_avgdenom = np.sum(harm_avgdenom_tot, axis=0) / Nsims
+            harm_R2avg = harm_avgnum / harm_avgdenom
 
         #Set Save Names
-        savenames = ['harm_R1', 'harm_R2', 'harm_avgnum', 'harm_avgdenom']
+        if args.R_def == 'R1' or args.R_def == 'both':
+            savenames = ['harm_R1']
+            saveobjs = [harm_R1avg]
+        elif args.R_def == 'R2' or args.R_def == 'both':
+            savenames = ['harm_R2', 'harm_avgnum', 'harm_avgdenom']
+            saveobjs = [harm_R2avg, harm_avgnum, harm_avgdenom]
+        if args.sim_version == 'release':
+            for i, name in enumerate(savenames):
+                savenames[i] = name + '_' + args.channel
         if args.fft_normalize == 'yes':
             for i, name in enumerate(savenames):
                 savenames[i] = name + '_Al'
+        if args.iso:
+            for i, name in enumerate(savenames):
+                savenames[i] = name + '_iso'
         for i, name in enumerate(savenames):
             savenames[i] = name + '_' + str(Nsims)
         
         #Save Outputs
-        saveobjs = [harm_R1avg, harm_R2avg, harm_avgnum, harm_avgdenom]
         for name, obj in zip(savenames, saveobjs):
             np.save(OUTPUT_PATH + name + '.npy', obj)
 

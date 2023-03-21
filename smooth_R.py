@@ -3,6 +3,7 @@ from pixell import enmap
 import argparse
 import myfuncs as mf
 import time
+from pathlib import Path
 
 """
 Smooths given response function.
@@ -10,14 +11,19 @@ Smooths given response function.
 
 #Parser
 parser = argparse.ArgumentParser(description= "Smooths given response functions")
-parser.add_argument('--sim_version', type=str, default='gerrit', choices=['v3', 'v2', 'gerrit', 'release'])
+parser.add_argument('--sim_version', type=str, choices=['v3', 'v2', 'gerrit', 'release'])
+parser.add_argument('--channel', type=str, choices=['MV', 'POL', 'both'])
 parser.add_argument('--factors', type=int, action='append', help='Smoothing factor(s)')
-parser.add_argument('--only_max_sims', type=mf.str2bool, help='Only smooth response function corresponding to the maximum number of sims?')
+parser.add_argument('--only_max_sims', type=mf.str2bool, default='no', help='Only smooth response function corresponding to the maximum number of sims? If not, uses response functions from a text file, the path to which is hardcoded')
+parser.add_argument('--clobber', type=mf.str2bool, default='no')
 parser.add_argument('--outdir', type=str, default='project', choices=['project', 'scratch'])
 args = parser.parse_args()
 
 #Paths 
-R_names_file = '/project/r/rbond/ymehta3/input_data/kappa_sims/R_' + args.sim_version + '_coarse_names.txt'
+if args.sim_version == 'release':
+    R_names_file = '/project/r/rbond/ymehta3/input_data/kappa_sims/R_release_' + args.channel + '_coarse_names.txt'
+else:
+    R_names_file = '/project/r/rbond/ymehta3/input_data/kappa_sims/R_' + args.sim_version + '_coarse_names.txt'
 if (args.outdir).lower() == 'project':
     OUTDIR = '/project/r/rbond/ymehta3/output/lensresponse/'
 elif (args.outdir).lower() == 'scratch':
@@ -31,7 +37,7 @@ OUTPATH = OUTDIR + args.sim_version + "/"
 #Read Response Functions Names
 N_Rs, R_names = mf.readTxt(R_names_file)
 if args.only_max_sims:
-    R_names = R_names[-1]
+    R_names = [R_names[-1]]
 
 #Smoothing Factors
 factor_list = args.factors
@@ -46,6 +52,16 @@ for iR, R_name in enumerate(R_names):
     R2_map = enmap.enmap(R2)
     
     for factor in factor_list:
+        #Outputs
+        if args.sim_version == 'release':
+            outname = 'R2_' + args.channel + '_smoothed_' + str(factor) + '_' + args.sim_version + '_' + R_name[-7:-4] + '.npy'        
+        else:
+            outname = 'R2_smoothed_' + str(factor) + '_' + args.sim_version + '_' + R_name[-7:-4] + '.npy'        
+        write_to_path = OUTPATH + outname
+        pathobj = Path(write_to_path)
+        if not args.clobber and pathobj.is_file():
+            continue
+
         #Smooth 
         R_lowres = R2_map.downgrade(factor, op=np.nanmean)
 
@@ -75,11 +91,11 @@ for iR, R_name in enumerate(R_names):
         R_blocked[:iborder, :iborder+1] = extrapolated
         
         #Save
-        np.save(OUTPATH + 'R2_smoothed_' + str(factor) + '_' + args.sim_version + '_' + R_name[8:11] + '.npy', R_blocked)
+        np.save(write_to_path, R_blocked)
 
     #Time Diagnostics
     end = time.time()
     time_min, time_sec = divmod(end-start, 60)
     time_sec = round( time_sec )
-    print(f'\nTook {time_min:.0f} min and {time_sec} sec for response function {iR+1}/{N_Rs}')
+    print(f'\nTook {time_min:.0f} min and {time_sec} sec for {R_name}  ({iR+1}/{N_Rs})')
     print('\n')
