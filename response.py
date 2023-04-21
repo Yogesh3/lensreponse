@@ -7,6 +7,7 @@ import time
 import sys
 import csv
 from mpi4py import MPI 
+import orphics
 from scipy.interpolate import interp2d
 import argparse
 
@@ -72,13 +73,17 @@ parser.add_argument('--sim_version', type=str, default='release', choices=['v3',
 parser.add_argument('--R_def', type=str, default='R2', choices=['R2', 'R1', 'both'])
 parser.add_argument('--channel', type=str, choices=['MV', 'POL', 'both'])
 parser.add_argument('--space', type=str, default='harmonic', choices=['harmonic', 'fourier', 'both'])
+parser.add_argument('--wfrank', action='store_true', help='Use the w factors that Frank used')
+parser.add_argument('--wyogesh', dest='wfrank', action='store_false')
 parser.add_argument('--iso', action='store_true')
 parser.add_argument('--aniso', dest='iso', action='store_false')
-parser.add_argument('--convergence', type = mf.str2bool, default='false', help='calculate std of every ~100 sims for convergence test')
+parser.add_argument('--converg_delta', type = int, default='0', help='distance between each sim used for convergence test')
+parser.add_argument('--converg_sims', type = int, help='specific sims used for convergence test')
 parser.add_argument('--fft_normalize', type=str, default='no', choices=['yes', 'no'], help='normalize kappa sims by the fft normalization curve from symlens before calculating the harmonic response function?')
 parser.add_argument('--nsims', type=int, default=0, help='number of simulations (leave blank for max sims in this set)')
 parser.add_argument('--outdir', type=str, default='project', choices=['project', 'scratch'])
-parser.set_defaults(iso = False)
+parser.set_defaults(iso = False, wfrank = False)
+# parser.set_defaults(iso = False)
 args = parser.parse_args()
 
 comm = MPI.COMM_WORLD
@@ -223,8 +228,7 @@ harm_stats_tot = []
 fft_stats_tot = []
 rank_Nsims = rows_per_rank[rank]
 Nsims = sum(rows_per_rank)
-delta = 100
-rank_delta = delta % Nprocs
+rank_delta = args.converg_delta // Nprocs
 
 for simfiles in fnames_subset:
     sim_startime = time.time()
@@ -249,7 +253,9 @@ for simfiles in fnames_subset:
 
     #Make Output Map
     footprint = enmap.zeros(mask_map.shape, wcs=mask_map.wcs)
-    omap = curvedsky.alm2map(okappa_idx, footprint, tweak=True)
+    # omap = curvedsky.alm2map(okappa_idx, footprint, tweak=True)
+    if args.space == 'fourier' or args.space == 'both' or args.fft_normalize == 'yes':
+        omap = curvedsky.alm2map(okappa_idx, footprint)
 
     #Read Input Alms
     ikappa_filename = inkappa_path + simfiles[0]
@@ -266,7 +272,12 @@ for simfiles in fnames_subset:
 
     #Make Masked Input Map
     imap = curvedsky.alm2map(ikappa_alms, footprint, tweak=True)
-    imap_masked = imap * mask_map**2         # reconstruction multiplies two copies of the masked maps
+    # imap = curvedsky.alm2map(ikappa_alms, footprint)
+    if args.wfrank:
+        imap_masked = imap * mask_map
+    else:
+        imap_masked = imap * mask_map**2         # reconstruction multiplies two copies of the masked maps
+    # ikappa_idx = curvedsky.map2alm(imap_masked, lmax= olmax)
     ikappa_idx = curvedsky.map2alm(imap_masked, lmax= olmax, tweak=True)
 
     #Convert kappas To l,m Grid
@@ -331,9 +342,11 @@ for simfiles in fnames_subset:
             harm_avgdenom += harm_sim_denom
     
             #Calculate Convergence Test Info
-            if simnum == rank_delta and args.convergence:
-                mu = np.mu(harm_avgnum/harm_avgdenom)
-                var = np.var(harm_avgnum/harm_avgdenom)
+            if args.convergence and not (rank_delta % simnum):
+                sum_R = np.sum(harm_avgnum/harm_avgdenom)
+                sum_avgnum = np.sum(harm_avgnum)
+                var_R = np.var(harm_avgnum/harm_avgdenom)
+                var_avgnum = np.var(harm_avgnum)
                 n_sims = simnum
                 mu_tot = comm.Gather(mu, root=0)
                 var_tot = comm.Gather(var, root=0)
@@ -399,9 +412,17 @@ if args.space == 'harmonic' or args.space == 'both':
         #Average over the Ranks
         if args.R_def == 'R1' or args.R_def == 'both':
             harm_R1avg = np.sum(harm_R1_tot, axis=0) / Nsims
+
         if args.R_def == 'R2' or args.R_def == 'both':
             harm_avgnum = np.sum(harm_avgnum_tot, axis=0)  / Nsims
             harm_avgdenom = np.sum(harm_avgdenom_tot, axis=0) / Nsims
+            #W Factors
+            if args.wfrank:
+                w3 = orphics.maps.wfactor(3, mask_map)
+                w2 = orphics.maps.wfactor(2, mask_map)
+                harm_avgnum /= w3
+                harm_avgdenom /= w2
+
             harm_R2avg = harm_avgnum / harm_avgdenom
 
         #Set Save Names
@@ -420,6 +441,9 @@ if args.space == 'harmonic' or args.space == 'both':
         if args.iso:
             for i, name in enumerate(savenames):
                 savenames[i] = name + '_iso'
+        if args.wfrank:
+            for i, name in enumerate(savenames):
+                savenames[i] = name + '_wfrank'
         for i, name in enumerate(savenames):
             savenames[i] = name + '_' + str(Nsims)
         

@@ -11,19 +11,26 @@ Smooths given response function.
 
 #Parser
 parser = argparse.ArgumentParser(description= "Smooths given response functions")
-parser.add_argument('--sim_version', type=str, choices=['v3', 'v2', 'gerrit', 'release'])
-parser.add_argument('--channel', type=str, choices=['MV', 'POL', 'both'])
+parser.add_argument('--sim_version', type=str, choices=['v3', 'v2', 'gerrit', 'release', 'nonoise'])
+parser.add_argument('--names_file', type=str, default=None)
+parser.add_argument('--channel', type=str, choices=['MV', 'POL'])
 parser.add_argument('--factors', type=int, action='append', help='Smoothing factor(s)')
-parser.add_argument('--only_max_sims', type=mf.str2bool, default='no', help='Only smooth response function corresponding to the maximum number of sims? If not, uses response functions from a text file, the path to which is hardcoded')
+parser.add_argument('--R_def', type=str, choices=['R2', 'R3'])
+parser.add_argument('--only_max_sims', type=mf.str2bool, default='no', help='Only smooth response function corresponding to the maximum number of sims? If not, uses response functions from the text file')
 parser.add_argument('--clobber', type=mf.str2bool, default='no')
 parser.add_argument('--outdir', type=str, default='project', choices=['project', 'scratch'])
 args = parser.parse_args()
 
-#Paths 
-if args.sim_version == 'release':
-    R_names_file = '/project/r/rbond/ymehta3/input_data/kappa_sims/R_release_' + args.channel + '_coarse_names.txt'
+#Names File
+if args.names_file is None:
+    if args.sim_version == 'release' or args.sim_version == 'nonoise':
+        R_names_file = '/project/r/rbond/ymehta3/input_data/kappa_sims/' + '_'.join([args.R_def, args.sim_version, args.channel]) + '_coarse_names.txt'
+    else:
+        R_names_file = '/project/r/rbond/ymehta3/input_data/kappa_sims/R_' + args.sim_version + '_coarse_names.txt'
 else:
-    R_names_file = '/project/r/rbond/ymehta3/input_data/kappa_sims/R_' + args.sim_version + '_coarse_names.txt'
+    R_names_file = args.names_file
+
+#Paths 
 if (args.outdir).lower() == 'project':
     OUTDIR = '/project/r/rbond/ymehta3/output/lensresponse/'
 elif (args.outdir).lower() == 'scratch':
@@ -53,10 +60,10 @@ for iR, R_name in enumerate(R_names):
     
     for factor in factor_list:
         #Outputs
-        if args.sim_version == 'release':
-            outname = 'R2_' + args.channel + '_smoothed_' + str(factor) + '_' + args.sim_version + '_' + R_name[-7:-4] + '.npy'        
+        if args.sim_version == 'release' or args.sim_version == 'nonoise':
+            outname = args.R_def + '_' + args.channel + '_smoothed_' + str(factor) + '_' + args.sim_version + '_' + R_name[-7:-4] + '.npy'        
         else:
-            outname = 'R2_smoothed_' + str(factor) + '_' + args.sim_version + '_' + R_name[-7:-4] + '.npy'        
+            outname = args.R_def + '_smoothed_' + str(factor) + '_' + args.sim_version + '_' + R_name[-7:-4] + '.npy'        
         write_to_path = OUTPATH + outname
         pathobj = Path(write_to_path)
         if not args.clobber and pathobj.is_file():
